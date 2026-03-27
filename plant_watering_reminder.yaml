@@ -2,19 +2,32 @@ blueprint:
   name: Plant Watering Reminder
   description: >
     Sends a daily notification at a chosen time reminding you to water a plant
-    if it hasn't been watered within the configured interval.
+    if it hasn't been watered within the configured interval. Scanning an RFID
+    tag attached to the plant's pot marks it as watered and resets the timer.
 
-    **Before using this blueprint, create these helpers:**
-    - `input_datetime` (date and time) — to track when the plant was last watered
-    - `input_button` — to mark the plant as watered
 
-    Both helpers are mapped during blueprint setup.
+    **Before using this blueprint, create one helper:**
+
+    - `input_datetime` (date and time) — tracks when the plant was last watered.
+      In Home Assistant go to Settings → Helpers → Create Helper → Date and/or Time,
+      and make sure you select "Date and Time" (not date only or time only).
+
+
+    **Finding your RFID tag ID:**
+
+    1. Go to Developer Tools → Events
+    2. In "Listen to events" enter `tag_scanned` and click Start Listening
+    3. Scan your NFC/RFID tag
+    4. Copy the `tag_id` value from the event data that appears
+    5. Paste it into the Tag ID field below
 
   domain: automation
   input:
     plant_name:
       name: Plant Name
-      description: The name of the plant (used in notifications).
+      description: >
+        The name of this plant. Used in notifications so you know which plant
+        needs attention.
       selector:
         text:
       default: "My Plant"
@@ -22,35 +35,37 @@ blueprint:
     last_watered_helper:
       name: Last Watered Helper
       description: >
-        An input_datetime helper (date & time) that stores when the plant was
-        last watered. Create this helper before setting up the blueprint.
+        An input_datetime helper (date & time) that stores when this plant was
+        last watered. Create this helper before setting up the blueprint, and
+        use a unique helper per plant.
       selector:
         entity:
           domain: input_datetime
 
-    watered_button:
-      name: Watered Button
+    rfid_tag_id:
+      name: RFID Tag ID
       description: >
-        An input_button helper. Press this to mark the plant as watered and
-        reset the countdown.
-      selector:
-        entity:
-          domain: input_button
-
-    notify_target:
-      name: Notification Target
-      description: >
-        The mobile app notification service to send reminders to.
-        Example: notify.mobile_app_your_phone
+        The unique ID of the RFID or NFC tag attached to this plant's pot.
+        Scan the tag and check Developer Tools → Events (listening for
+        tag_scanned) to find the ID. Paste the tag_id value here exactly.
       selector:
         text:
-      default: notify.mobile_app_my_phone
+
+    notify_target:
+      name: Notification Service
+      description: >
+        The mobile app notification service to send reminders to.
+        Find yours in Developer Tools → Services, look for notify.mobile_app_*
+        and enter it exactly as shown. Example: notify.mobile_app_my_phone
+      selector:
+        text:
+      default: "notify.mobile_app_my_phone"
 
     notification_time:
       name: Daily Check Time
       description: >
-        The time each day to check whether the plant needs watering and send
-        a notification if it does.
+        The time each day to check whether the plant needs watering. If it
+        does, a notification will be sent.
       selector:
         time:
       default: "09:00:00"
@@ -69,7 +84,7 @@ blueprint:
 
     notification_title:
       name: Notification Title
-      description: Title of the reminder notification.
+      description: Title of the watering reminder notification.
       selector:
         text:
       default: "🌿 Plant Watering Reminder"
@@ -78,18 +93,33 @@ blueprint:
       name: Notification Message
       description: >
         Message body for the reminder. Use {plant_name} to insert the plant
-        name and {days} for how many days since last watered.
+        name and {days} for how many days since it was last watered.
       selector:
         text:
       default: "Your {plant_name} needs watering! It's been {days} day(s) since it was last watered."
+
+    watered_confirmation:
+      name: Send Watered Confirmation
+      description: >
+        Send a confirmation notification when the RFID tag is scanned and the
+        plant is marked as watered.
+      selector:
+        boolean:
+      default: true
 
 variables:
   plant_name: !input plant_name
   last_watered_helper: !input last_watered_helper
   watering_interval: !input watering_interval
   notification_message: !input notification_message
+  rfid_tag_id: !input rfid_tag_id
   days_since_watered: >
-    {{ ((now() - states(last_watered_helper) | as_datetime | as_local).total_seconds() / 86400) | round(1) }}
+    {% set last = states(last_watered_helper) %}
+    {% if last in ['unknown', 'unavailable', ''] %}
+      999
+    {% else %}
+      {{ ((now() - last | as_datetime | as_local).total_seconds() / 86400) | round(1) }}
+    {% endif %}
 
 trigger:
   # Daily check trigger
@@ -97,32 +127,42 @@ trigger:
     at: !input notification_time
     id: daily_check
 
-  # Mark as watered trigger
-  - platform: state
-    entity_id: !input watered_button
-    id: mark_watered
+  # RFID tag scanned trigger
+  - platform: event
+    event_type: tag_scanned
+    event_data:
+      tag_id: !input rfid_tag_id
+    id: tag_scanned
 
 action:
   - choose:
 
-      # --- Handle: Mark as Watered ---
+      # --- Handle: RFID Tag Scanned → Mark as Watered ---
       - conditions:
           - condition: trigger
-            id: mark_watered
+            id: tag_scanned
         sequence:
           - service: input_datetime.set_datetime
             target:
               entity_id: !input last_watered_helper
             data:
               datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - if:
+              - condition: template
+                value_template: !input watered_confirmation
+            then:
+              - service: !input notify_target
+                data:
+                  title: "✅ {{ plant_name }} Watered"
+                  message: "{{ plant_name }} has been marked as watered. Next check in {{ watering_interval }} day(s)."
 
-      # --- Handle: Daily Check ---
+      # --- Handle: Daily Check → Send Reminder if Overdue ---
       - conditions:
           - condition: trigger
             id: daily_check
           - condition: template
             value_template: >
-              {{ days_since_watered >= watering_interval }}
+              {{ days_since_watered | float >= watering_interval | float }}
         sequence:
           - service: !input notify_target
             data:
