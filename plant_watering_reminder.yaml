@@ -29,7 +29,7 @@ blueprint:
           domain: input_datetime
 
     watered_button:
-      name: "Watered" Button
+      name: Watered Button
       description: >
         An input_button helper. Press this to mark the plant as watered and
         reset the countdown.
