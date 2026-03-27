@@ -1,0 +1,136 @@
+blueprint:
+  name: Plant Watering Reminder
+  description: >
+    Sends a daily notification at a chosen time reminding you to water a plant
+    if it hasn't been watered within the configured interval.
+
+    **Before using this blueprint, create these helpers:**
+    - `input_datetime` (date and time) — to track when the plant was last watered
+    - `input_button` — to mark the plant as watered
+
+    Both helpers are mapped during blueprint setup.
+
+  domain: automation
+  input:
+    plant_name:
+      name: Plant Name
+      description: The name of the plant (used in notifications).
+      selector:
+        text:
+      default: "My Plant"
+
+    last_watered_helper:
+      name: Last Watered Helper
+      description: >
+        An input_datetime helper (date & time) that stores when the plant was
+        last watered. Create this helper before setting up the blueprint.
+      selector:
+        entity:
+          domain: input_datetime
+
+    watered_button:
+      name: "Watered" Button
+      description: >
+        An input_button helper. Press this to mark the plant as watered and
+        reset the countdown.
+      selector:
+        entity:
+          domain: input_button
+
+    notify_target:
+      name: Notification Target
+      description: >
+        The mobile app notification service to send reminders to.
+        Example: notify.mobile_app_your_phone
+      selector:
+        text:
+      default: notify.mobile_app_my_phone
+
+    notification_time:
+      name: Daily Check Time
+      description: >
+        The time each day to check whether the plant needs watering and send
+        a notification if it does.
+      selector:
+        time:
+      default: "09:00:00"
+
+    watering_interval:
+      name: Watering Interval (days)
+      description: How many days between waterings.
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 1
+          unit_of_measurement: days
+          mode: slider
+
+    notification_title:
+      name: Notification Title
+      description: Title of the reminder notification.
+      selector:
+        text:
+      default: "🌿 Plant Watering Reminder"
+
+    notification_message:
+      name: Notification Message
+      description: >
+        Message body for the reminder. Use {plant_name} to insert the plant
+        name and {days} for how many days since last watered.
+      selector:
+        text:
+      default: "Your {plant_name} needs watering! It's been {days} day(s) since it was last watered."
+
+variables:
+  plant_name: !input plant_name
+  last_watered_helper: !input last_watered_helper
+  watering_interval: !input watering_interval
+  notification_message: !input notification_message
+  days_since_watered: >
+    {{ ((now() - states(last_watered_helper) | as_datetime | as_local).total_seconds() / 86400) | round(1) }}
+
+trigger:
+  # Daily check trigger
+  - platform: time
+    at: !input notification_time
+    id: daily_check
+
+  # Mark as watered trigger
+  - platform: state
+    entity_id: !input watered_button
+    id: mark_watered
+
+action:
+  - choose:
+
+      # --- Handle: Mark as Watered ---
+      - conditions:
+          - condition: trigger
+            id: mark_watered
+        sequence:
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: !input last_watered_helper
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+      # --- Handle: Daily Check ---
+      - conditions:
+          - condition: trigger
+            id: daily_check
+          - condition: template
+            value_template: >
+              {{ days_since_watered >= watering_interval }}
+        sequence:
+          - service: !input notify_target
+            data:
+              title: !input notification_title
+              message: >
+                {{ notification_message
+                    | replace('{plant_name}', plant_name)
+                    | replace('{days}', days_since_watered | string) }}
+
+mode: queued
+max: 10
